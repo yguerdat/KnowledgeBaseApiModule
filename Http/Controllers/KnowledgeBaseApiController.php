@@ -40,44 +40,24 @@ class KnowledgeBaseApiController extends Controller
             if ($mailbox === null) {
                 return Response::json(['error' => 'Mailbox not found'], 404);
             }
+
+            $locale = $this->resolveLocale($request, $mailbox);
+            $filterLocale = $request->input('lang') ?? $request->input('locale');
+            $flat = (bool) $request->input('flat', false);
+
             $categories = \KbCategory::getTree($mailbox->id, [], 0, true);
+            $allCategories = collect($categories)->all();
 
-            $locale = $request->input('locale') ?? \Kb::defaultLocale($mailbox);
-
-            $items = [];
-
-            foreach ($categories as $c) {
-                if (!$c->checkVisibility()) {
-                    continue;
-                }
-                
-                // Generate URL for the category
-                $categoryUrl = $this->buildCategoryUrl($mailbox->id, $c->id);
-                
-                // Generate client URL if template is set
-                $clientUrl = $this->buildClientCategoryUrl($mailbox->id, $c->id);
-                
-                // Get article count - only published articles
-                $articleCount = 0;
-                if (method_exists($c, 'getArticlesSorted')) {
-                    $articles = $c->getArticlesSorted(true); // true = published only
-                    $articleCount = count($articles);
-                }
-                
-                $items[] = (object)[
-                    'id' => $c->id,
-                    'name' => $c->getAttributeInLocale('name', $locale),
-                    'description' => $c->getAttributeInLocale('description', $locale),
-                    'url' => $categoryUrl,
-                    'client_url' => $clientUrl,
-                    'article_count' => $articleCount
-                ];
+            if ($flat) {
+                $result = $this->buildCategoryFlat($allCategories, $locale, $mailbox->id, $filterLocale);
+            } else {
+                $result = $this->buildCategoryTree($allCategories, 0, $locale, $mailbox->id, $filterLocale);
             }
 
             return Response::json([
                 'mailbox_id' => $mailbox->id,
                 'name' => $mailbox->name,
-                'categories' => $items,
+                'categories' => $result,
             ], 200);
         } catch (\Exception $e) {
             return Response::json(['error' => $e->getMessage()], 500);
@@ -116,7 +96,7 @@ class KnowledgeBaseApiController extends Controller
                 $sortedArticles = $category->getArticlesSorted(true);
             }
 
-            $locale = $request->input('locale') ?? \Kb::defaultLocale($mailbox);
+            $locale = $this->resolveLocale($request, $mailbox);
 
             foreach ($sortedArticles as $a) {
                 $a->setLocale($locale);
@@ -128,16 +108,14 @@ class KnowledgeBaseApiController extends Controller
                 $clientUrl = $this->buildClientArticleUrl($mailbox->id, $category->id, $a->id);
                 
                 $articles[] = (object)[
-                    'id' => $a->id, 
-                    'title' => $a->getAttributeInLocale('title', $locale), 
-                    'text' => $a->getAttributeInLocale('text', $locale),
-                    'url' => $articleUrl,
-                    'client_url' => $clientUrl
+                    'id'         => $a->id,
+                    'title'      => $a->getAttributeInLocale('title', $locale),
+                    'text'       => $a->getAttributeInLocale('text', $locale),
+                    'locale'     => $a->locale,
+                    'url'        => $articleUrl,
+                    'client_url' => $clientUrl,
                 ];
             }
-
-            // Get locale
-            $locale = $request->input('locale') ?? \Kb::defaultLocale($mailbox);
 
             // Generate category URLs
             $categoryUrl = $this->buildCategoryUrl($mailbox->id, $category->id);
@@ -181,11 +159,14 @@ class KnowledgeBaseApiController extends Controller
                 return Response::json(['error' => 'Search keyword is required'], 400);
             }
 
-            $locale = $request->input('locale') ?? \Kb::defaultLocale($mailbox);
-            
+            $locale = $this->resolveLocale($request, $mailbox);
+
+            // Only filter by locale if explicitly requested
+            $filterLocale = $request->input('lang') ?? $request->input('locale');
+
             // Convert keyword to lowercase for case-insensitive search
             $keyword = mb_strtolower($keyword);
-            
+
             // Search in published articles only, using case-insensitive search
             $articles = KbArticle::where('mailbox_id', $mailbox->id)
                 ->where(function($query) use ($keyword) {
@@ -193,6 +174,9 @@ class KnowledgeBaseApiController extends Controller
                           ->orWhereRaw('LOWER(text) LIKE ?', ['%'.$keyword.'%']);
                 })
                 ->where('status', KbArticle::STATUS_PUBLISHED)
+                ->when($filterLocale, function($q) use ($filterLocale) {
+                    $q->where('locale', $filterLocale);
+                })
                 ->get();
 
             $results = [];
@@ -222,12 +206,13 @@ class KnowledgeBaseApiController extends Controller
                     $clientArticleUrl = $this->buildClientArticleUrl($mailbox->id, $firstCategoryId, $article->id);
                     
                     $results[] = [
-                        'id' => $article->id,
-                        'title' => $article->getAttributeInLocale('title', $locale),
-                        'text' => $article->getAttributeInLocale('text', $locale),
+                        'id'         => $article->id,
+                        'title'      => $article->getAttributeInLocale('title', $locale),
+                        'text'       => $article->getAttributeInLocale('text', $locale),
+                        'locale'     => $article->locale,
                         'categories' => $categories,
-                        'url' => $articleUrl,
-                        'client_url' => $clientArticleUrl
+                        'url'        => $articleUrl,
+                        'client_url' => $clientArticleUrl,
                     ];
                 }
             }
@@ -297,7 +282,7 @@ class KnowledgeBaseApiController extends Controller
             KbArticleViews::incrementViews($articleId, $categoryId, $mailboxId);
 
             // Get locale
-            $locale = $request->input('locale') ?? \Kb::defaultLocale($mailbox);
+            $locale = $this->resolveLocale($request, $mailbox);
             $article->setLocale($locale);
 
             // Use the helper method to build the URL
@@ -318,12 +303,148 @@ class KnowledgeBaseApiController extends Controller
                     'client_url' => $clientCategoryUrl
                 ],
                 'article' => [
-                    'id' => $article->id,
-                    'title' => $article->getAttributeInLocale('title', $locale),
-                    'text' => $article->getAttributeInLocale('text', $locale),
-                    'url' => $articleUrl,
-                    'client_url' => $clientArticleUrl
+                    'id'         => $article->id,
+                    'title'      => $article->getAttributeInLocale('title', $locale),
+                    'text'       => $article->getAttributeInLocale('text', $locale),
+                    'locale'     => $article->locale,
+                    'url'        => $articleUrl,
+                    'client_url' => $clientArticleUrl,
                 ]
+            ], 200);
+        } catch (\Exception $e) {
+            return Response::json(['error' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Resolve locale from request, preferring `lang` over `locale`, falling back to mailbox default.
+     *
+     * @param Request $request
+     * @param \App\Mailbox $mailbox
+     * @return string
+     */
+    private function resolveLocale(Request $request, $mailbox): string
+    {
+        return $request->input('lang')
+            ?? $request->input('locale')
+            ?? \Kb::defaultLocale($mailbox);
+    }
+
+    /**
+     * Recursively build a nested category tree from a flat list.
+     * When $filterLocale is set, categories with no published articles in that locale are excluded.
+     *
+     * @param array $allCategories
+     * @param int $parentId
+     * @param string $locale
+     * @param int $mailboxId
+     * @param string|null $filterLocale
+     * @return array
+     */
+    private function buildCategoryTree(array $allCategories, int $parentId, string $locale, int $mailboxId, ?string $filterLocale = null): array
+    {
+        $tree = [];
+        foreach ($allCategories as $c) {
+            $catParentId = (int)($c->parent_id ?? 0);
+            if ($catParentId !== $parentId) {
+                continue;
+            }
+            if (!$c->checkVisibility()) {
+                continue;
+            }
+
+            $children = $this->buildCategoryTree($allCategories, (int)$c->id, $locale, $mailboxId, $filterLocale);
+
+            $articleCount = 0;
+            if (method_exists($c, 'getArticlesSorted')) {
+                $articles = $c->getArticlesSorted(true);
+                if ($filterLocale) {
+                    $articles = array_filter($articles, fn($a) => $a->locale === $filterLocale);
+                }
+                $articleCount = count($articles);
+            }
+
+            // Skip categories with no matching articles and no matching children
+            if ($filterLocale && $articleCount === 0 && empty($children)) {
+                continue;
+            }
+
+            $tree[] = [
+                'id'            => $c->id,
+                'name'          => $c->getAttributeInLocale('name', $locale),
+                'description'   => $c->getAttributeInLocale('description', $locale),
+                'url'           => $this->buildCategoryUrl($mailboxId, $c->id),
+                'client_url'    => $this->buildClientCategoryUrl($mailboxId, $c->id),
+                'article_count' => $articleCount,
+                'children'      => $children,
+            ];
+        }
+        return $tree;
+    }
+
+    /**
+     * Build a flat (non-nested) list of visible categories.
+     * When $filterLocale is set, categories with no published articles in that locale are excluded.
+     *
+     * @param array $allCategories
+     * @param string $locale
+     * @param int $mailboxId
+     * @param string|null $filterLocale
+     * @return array
+     */
+    private function buildCategoryFlat(array $allCategories, string $locale, int $mailboxId, ?string $filterLocale = null): array
+    {
+        $flat = [];
+        foreach ($allCategories as $c) {
+            if (!$c->checkVisibility()) {
+                continue;
+            }
+            $articleCount = 0;
+            if (method_exists($c, 'getArticlesSorted')) {
+                $articles = $c->getArticlesSorted(true);
+                if ($filterLocale) {
+                    $articles = array_filter($articles, fn($a) => $a->locale === $filterLocale);
+                }
+                $articleCount = count($articles);
+            }
+            if ($filterLocale && $articleCount === 0) {
+                continue;
+            }
+            $flat[] = [
+                'id'            => $c->id,
+                'parent_id'     => $c->parent_id ? (int)$c->parent_id : null,
+                'name'          => $c->getAttributeInLocale('name', $locale),
+                'description'   => $c->getAttributeInLocale('description', $locale),
+                'url'           => $this->buildCategoryUrl($mailboxId, $c->id),
+                'client_url'    => $this->buildClientCategoryUrl($mailboxId, $c->id),
+                'article_count' => $articleCount,
+            ];
+        }
+        return $flat;
+    }
+
+    /**
+     * Get the list of distinct locales available for published articles in a mailbox.
+     *
+     * @param Request $request
+     * @param int $mailboxId
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function languages(Request $request, $mailboxId)
+    {
+        try {
+            $mailbox = Mailbox::findOrFail($mailboxId);
+            $locales = KbArticle::where('mailbox_id', $mailbox->id)
+                ->where('status', KbArticle::STATUS_PUBLISHED)
+                ->whereNotNull('locale')
+                ->distinct()
+                ->pluck('locale')
+                ->filter()
+                ->values()
+                ->toArray();
+            return Response::json([
+                'mailbox_id' => $mailbox->id,
+                'languages'  => $locales,
             ], 200);
         } catch (\Exception $e) {
             return Response::json(['error' => $e->getMessage()], 500);
@@ -459,7 +580,7 @@ class KnowledgeBaseApiController extends Controller
 
             $limit = (int) $request->input('limit', 5);
             $type = $request->input('type', 'all');
-            $locale = $request->input('locale') ?? \Kb::defaultLocale($mailbox);
+            $locale = $this->resolveLocale($request, $mailbox);
             
             $response = [
                 'mailbox_id' => $mailbox->id,
@@ -554,7 +675,7 @@ class KnowledgeBaseApiController extends Controller
                 return Response::json(['error' => 'Mailbox not found'], 404);
             }
 
-            $locale = $request->input('locale') ?? \Kb::defaultLocale($mailbox);
+            $locale = $this->resolveLocale($request, $mailbox);
             $includeHidden = $request->input('include_hidden', false);
             
             // Get all categories for this mailbox
@@ -597,11 +718,12 @@ class KnowledgeBaseApiController extends Controller
                     $article->setLocale($locale);
                     
                     $articleData = [
-                        'id' => $article->id,
-                        'title' => $article->getAttributeInLocale('title', $locale),
-                        'text' => $article->getAttributeInLocale('text', $locale),
-                        'status' => $article->status,
-                        'url' => $this->buildArticleUrl($mailbox->id, $category->id, $article->id),
+                        'id'         => $article->id,
+                        'title'      => $article->getAttributeInLocale('title', $locale),
+                        'text'       => $article->getAttributeInLocale('text', $locale),
+                        'locale'     => $article->locale,
+                        'status'     => $article->status,
+                        'url'        => $this->buildArticleUrl($mailbox->id, $category->id, $article->id),
                         'client_url' => $this->buildClientArticleUrl($mailbox->id, $category->id, $article->id),
                     ];
                     
