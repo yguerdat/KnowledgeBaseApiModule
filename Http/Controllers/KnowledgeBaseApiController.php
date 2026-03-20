@@ -45,13 +45,12 @@ class KnowledgeBaseApiController extends Controller
             $filterLocale = $request->input('lang') ?? $request->input('locale');
             $flat = (bool) $request->input('flat', false);
 
-            $categories = \KbCategory::getTree($mailbox->id, [], 0, true);
-            $allCategories = collect($categories)->all();
+            $categories = \KbCategory::getTree($mailbox->id);
 
             if ($flat) {
-                $result = $this->buildCategoryFlat($allCategories, $locale, $mailbox->id, $filterLocale);
+                $result = $this->buildCategoryFlat($categories, $locale, $mailbox->id, $filterLocale);
             } else {
-                $result = $this->buildCategoryTree($allCategories, 0, $locale, $mailbox->id, $filterLocale);
+                $result = $this->buildCategoryTree($categories, $locale, $mailbox->id, $filterLocale);
             }
 
             return Response::json([
@@ -87,34 +86,58 @@ class KnowledgeBaseApiController extends Controller
             if ($category === null) {
                 return Response::json(['error' => 'Category not found or not visible'], 404);
             }
-            
+
             // Track category view
             KbCategoryViews::incrementViews($categoryId, $mailboxId);
-            
-            $articles = [];
-            if ($category) {
-                $sortedArticles = $category->getArticlesSorted(true);
-            }
 
             $locale = $this->resolveLocale($request, $mailbox);
+            $filterLocale = $request->input('lang') ?? $request->input('locale');
 
+            // Get articles for this category
+            $articles = [];
+            $sortedArticles = $category->getArticlesSorted(true);
             foreach ($sortedArticles as $a) {
                 $a->setLocale($locale);
-                
-                // Use custom URL if configured
-                $articleUrl = $this->buildArticleUrl($mailbox->id, $category->id, $a->id);
-                
-                // Generate client URL if template is set
-                $clientUrl = $this->buildClientArticleUrl($mailbox->id, $category->id, $a->id);
-                
+
+                if ($filterLocale && $a->locale !== $filterLocale) {
+                    continue;
+                }
+
                 $articles[] = (object)[
                     'id'         => $a->id,
                     'title'      => $a->getAttributeInLocale('title', $locale),
                     'text'       => $a->getAttributeInLocale('text', $locale),
                     'locale'     => $a->locale,
-                    'url'        => $articleUrl,
-                    'client_url' => $clientUrl,
+                    'url'        => $this->buildArticleUrl($mailbox->id, $category->id, $a->id),
+                    'client_url' => $this->buildClientArticleUrl($mailbox->id, $category->id, $a->id),
                 ];
+            }
+
+            // Get sub-categories
+            $subCategories = $category->getSubCategories();
+            $children = [];
+            if ($subCategories && count($subCategories) > 0) {
+                foreach ($subCategories as $sub) {
+                    if (!$sub->checkVisibility()) {
+                        continue;
+                    }
+                    $subArticleCount = 0;
+                    if (method_exists($sub, 'getArticlesSorted')) {
+                        $subArticles = $sub->getArticlesSorted(true);
+                        if ($filterLocale) {
+                            $subArticles = array_filter($subArticles, fn($a) => $a->locale === $filterLocale);
+                        }
+                        $subArticleCount = count($subArticles);
+                    }
+                    $children[] = [
+                        'id'            => $sub->id,
+                        'name'          => $sub->getAttributeInLocale('name', $locale),
+                        'description'   => $sub->getAttributeInLocale('description', $locale),
+                        'url'           => $this->buildCategoryUrl($mailbox->id, $sub->id),
+                        'client_url'    => $this->buildClientCategoryUrl($mailbox->id, $sub->id),
+                        'article_count' => $subArticleCount,
+                    ];
+                }
             }
 
             // Generate category URLs
@@ -122,15 +145,15 @@ class KnowledgeBaseApiController extends Controller
             $clientCategoryUrl = $this->buildClientCategoryUrl($mailbox->id, $category->id);
 
             return Response::json([
-                'id' => 0,
                 'mailbox_id' => $mailbox->id,
                 'name' => $mailbox->name,
-                'category' => (object)[
-                    'id' => $category->id,
-                    'name' => $category->getAttributeInLocale('name', $locale),
-                    'description' => $category->getAttributeInLocale('description', $locale),
-                    'url' => $categoryUrl,
-                    'client_url' => $clientCategoryUrl
+                'category' => [
+                    'id'            => $category->id,
+                    'name'          => $category->getAttributeInLocale('name', $locale),
+                    'description'   => $category->getAttributeInLocale('description', $locale),
+                    'url'           => $categoryUrl,
+                    'client_url'    => $clientCategoryUrl,
+                    'children'      => $children,
                 ],
                 'articles' => $articles,
             ], 200);
@@ -331,29 +354,30 @@ class KnowledgeBaseApiController extends Controller
     }
 
     /**
-     * Recursively build a nested category tree from a flat list.
-     * When $filterLocale is set, categories with no published articles in that locale are excluded.
+     * Recursively build a nested category tree.
+     * Uses the ->categories property populated by KbCategory::getTree().
      *
-     * @param array $allCategories
-     * @param int $parentId
+     * @param array $categories
      * @param string $locale
      * @param int $mailboxId
      * @param string|null $filterLocale
      * @return array
      */
-    private function buildCategoryTree(array $allCategories, int $parentId, string $locale, int $mailboxId, ?string $filterLocale = null): array
+    private function buildCategoryTree(array $categories, string $locale, int $mailboxId, ?string $filterLocale = null): array
     {
         $tree = [];
-        foreach ($allCategories as $c) {
-            $catParentId = (int)($c->parent_id ?? 0);
-            if ($catParentId !== $parentId) {
-                continue;
-            }
+        foreach ($categories as $c) {
             if (!$c->checkVisibility()) {
                 continue;
             }
 
-            $children = $this->buildCategoryTree($allCategories, (int)$c->id, $locale, $mailboxId, $filterLocale);
+            $children = [];
+            if (!empty($c->categories)) {
+                $children = $this->buildCategoryTree(
+                    is_array($c->categories) ? $c->categories : $c->categories->all(),
+                    $locale, $mailboxId, $filterLocale
+                );
+            }
 
             $articleCount = 0;
             if (method_exists($c, 'getArticlesSorted')) {
@@ -384,18 +408,18 @@ class KnowledgeBaseApiController extends Controller
 
     /**
      * Build a flat (non-nested) list of visible categories.
-     * When $filterLocale is set, categories with no published articles in that locale are excluded.
+     * Recursively flattens the tree from KbCategory::getTree().
      *
-     * @param array $allCategories
+     * @param array $categories
      * @param string $locale
      * @param int $mailboxId
      * @param string|null $filterLocale
      * @return array
      */
-    private function buildCategoryFlat(array $allCategories, string $locale, int $mailboxId, ?string $filterLocale = null): array
+    private function buildCategoryFlat(array $categories, string $locale, int $mailboxId, ?string $filterLocale = null): array
     {
         $flat = [];
-        foreach ($allCategories as $c) {
+        foreach ($categories as $c) {
             if (!$c->checkVisibility()) {
                 continue;
             }
@@ -412,13 +436,21 @@ class KnowledgeBaseApiController extends Controller
             }
             $flat[] = [
                 'id'            => $c->id,
-                'parent_id'     => $c->parent_id ? (int)$c->parent_id : null,
+                'parent_id'     => $c->kb_category_id ? (int)$c->kb_category_id : null,
                 'name'          => $c->getAttributeInLocale('name', $locale),
                 'description'   => $c->getAttributeInLocale('description', $locale),
                 'url'           => $this->buildCategoryUrl($mailboxId, $c->id),
                 'client_url'    => $this->buildClientCategoryUrl($mailboxId, $c->id),
                 'article_count' => $articleCount,
             ];
+            // Recurse into sub-categories
+            if (!empty($c->categories)) {
+                $subFlat = $this->buildCategoryFlat(
+                    is_array($c->categories) ? $c->categories : $c->categories->all(),
+                    $locale, $mailboxId, $filterLocale
+                );
+                $flat = array_merge($flat, $subFlat);
+            }
         }
         return $flat;
     }
