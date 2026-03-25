@@ -43,14 +43,15 @@ class KnowledgeBaseApiController extends Controller
 
             $locale = $this->resolveLocale($request, $mailbox);
             $filterLocale = $request->input('lang') ?? $request->input('locale');
+            $defaultLocale = \Kb::defaultLocale($mailbox);
             $flat = (bool) $request->input('flat', false);
 
             $categories = \KbCategory::getTree($mailbox->id);
 
             if ($flat) {
-                $result = $this->buildCategoryFlat($categories, $locale, $mailbox->id, $filterLocale);
+                $result = $this->buildCategoryFlat($categories, $locale, $mailbox->id, $filterLocale, $defaultLocale);
             } else {
-                $result = $this->buildCategoryTree($categories, $locale, $mailbox->id, $filterLocale);
+                $result = $this->buildCategoryTree($categories, $locale, $mailbox->id, $filterLocale, $defaultLocale);
             }
 
             return Response::json([
@@ -92,6 +93,7 @@ class KnowledgeBaseApiController extends Controller
 
             $locale = $this->resolveLocale($request, $mailbox);
             $filterLocale = $request->input('lang') ?? $request->input('locale');
+            $defaultLocale = \Kb::defaultLocale($mailbox);
 
             // Get articles for this category
             $articles = [];
@@ -99,7 +101,7 @@ class KnowledgeBaseApiController extends Controller
             foreach ($sortedArticles as $a) {
                 $a->setLocale($locale);
 
-                if ($filterLocale && $a->locale !== $filterLocale) {
+                if ($filterLocale && !$this->localeMatches($a->locale, $filterLocale, $defaultLocale)) {
                     continue;
                 }
 
@@ -125,7 +127,7 @@ class KnowledgeBaseApiController extends Controller
                     if (method_exists($sub, 'getArticlesSorted')) {
                         $subArticles = collect($sub->getArticlesSorted(true));
                         if ($filterLocale) {
-                            $subArticles = $subArticles->filter(fn($a) => $a->locale === $filterLocale);
+                            $subArticles = $subArticles->filter(fn($a) => $this->localeMatches($a->locale, $filterLocale, $defaultLocale));
                         }
                         $subArticleCount = count($subArticles);
                     }
@@ -186,6 +188,7 @@ class KnowledgeBaseApiController extends Controller
 
             // Only filter by locale if explicitly requested
             $filterLocale = $request->input('lang') ?? $request->input('locale');
+            $defaultLocale = \Kb::defaultLocale($mailbox);
 
             // Convert keyword to lowercase for case-insensitive search
             $keyword = mb_strtolower($keyword);
@@ -197,13 +200,15 @@ class KnowledgeBaseApiController extends Controller
                           ->orWhereRaw('LOWER(text) LIKE ?', ['%'.$keyword.'%']);
                 })
                 ->where('status', KbArticle::STATUS_PUBLISHED)
-                ->when($filterLocale, function($q) use ($filterLocale) {
-                    $q->where('locale', $filterLocale);
-                })
                 ->get();
 
             $results = [];
             foreach ($articles as $article) {
+                // Skip articles that don't match the requested language
+                if ($filterLocale && !$this->localeMatches($article->locale, $filterLocale, $defaultLocale)) {
+                    continue;
+                }
+
                 // Get categories for this article and check if at least one is visible
                 $hasVisibleCategory = false;
                 $categories = [];
@@ -307,10 +312,11 @@ class KnowledgeBaseApiController extends Controller
             // Get locale
             $locale = $this->resolveLocale($request, $mailbox);
             $filterLocale = $request->input('lang') ?? $request->input('locale');
+            $defaultLocale = \Kb::defaultLocale($mailbox);
             $article->setLocale($locale);
 
             // If a language filter is specified, check that the article matches
-            if ($filterLocale && $article->locale !== $filterLocale) {
+            if ($filterLocale && !$this->localeMatches($article->locale, $filterLocale, $defaultLocale)) {
                 return Response::json(['error' => 'Article not available in the requested language'], 404);
             }
 
@@ -360,6 +366,21 @@ class KnowledgeBaseApiController extends Controller
     }
 
     /**
+     * Check if an article's locale matches the requested filter locale.
+     * Articles with empty/null locale are treated as matching the mailbox default locale.
+     *
+     * @param string|null $articleLocale
+     * @param string $filterLocale
+     * @param string $defaultLocale
+     * @return bool
+     */
+    private function localeMatches(?string $articleLocale, string $filterLocale, string $defaultLocale): bool
+    {
+        $effectiveLocale = (!empty($articleLocale)) ? $articleLocale : $defaultLocale;
+        return $effectiveLocale === $filterLocale;
+    }
+
+    /**
      * Recursively build a nested category tree.
      * Uses the ->categories property populated by KbCategory::getTree().
      *
@@ -367,9 +388,10 @@ class KnowledgeBaseApiController extends Controller
      * @param string $locale
      * @param int $mailboxId
      * @param string|null $filterLocale
+     * @param string $defaultLocale
      * @return array
      */
-    private function buildCategoryTree(array $categories, string $locale, int $mailboxId, ?string $filterLocale = null): array
+    private function buildCategoryTree(array $categories, string $locale, int $mailboxId, ?string $filterLocale = null, string $defaultLocale = ''): array
     {
         $tree = [];
         foreach ($categories as $c) {
@@ -381,7 +403,7 @@ class KnowledgeBaseApiController extends Controller
             if (!empty($c->categories)) {
                 $children = $this->buildCategoryTree(
                     is_array($c->categories) ? $c->categories : $c->categories->all(),
-                    $locale, $mailboxId, $filterLocale
+                    $locale, $mailboxId, $filterLocale, $defaultLocale
                 );
             }
 
@@ -389,7 +411,7 @@ class KnowledgeBaseApiController extends Controller
             if (method_exists($c, 'getArticlesSorted')) {
                 $articles = collect($c->getArticlesSorted(true));
                 if ($filterLocale) {
-                    $articles = $articles->filter(fn($a) => $a->locale === $filterLocale);
+                    $articles = $articles->filter(fn($a) => $this->localeMatches($a->locale, $filterLocale, $defaultLocale));
                 }
                 $articleCount = $articles->count();
             }
@@ -420,9 +442,10 @@ class KnowledgeBaseApiController extends Controller
      * @param string $locale
      * @param int $mailboxId
      * @param string|null $filterLocale
+     * @param string $defaultLocale
      * @return array
      */
-    private function buildCategoryFlat(array $categories, string $locale, int $mailboxId, ?string $filterLocale = null): array
+    private function buildCategoryFlat(array $categories, string $locale, int $mailboxId, ?string $filterLocale = null, string $defaultLocale = ''): array
     {
         $flat = [];
         foreach ($categories as $c) {
@@ -433,7 +456,7 @@ class KnowledgeBaseApiController extends Controller
             if (method_exists($c, 'getArticlesSorted')) {
                 $articles = collect($c->getArticlesSorted(true));
                 if ($filterLocale) {
-                    $articles = $articles->filter(fn($a) => $a->locale === $filterLocale);
+                    $articles = $articles->filter(fn($a) => $this->localeMatches($a->locale, $filterLocale, $defaultLocale));
                 }
                 $articleCount = $articles->count();
             }
@@ -453,7 +476,7 @@ class KnowledgeBaseApiController extends Controller
             if (!empty($c->categories)) {
                 $subFlat = $this->buildCategoryFlat(
                     is_array($c->categories) ? $c->categories : $c->categories->all(),
-                    $locale, $mailboxId, $filterLocale
+                    $locale, $mailboxId, $filterLocale, $defaultLocale
                 );
                 $flat = array_merge($flat, $subFlat);
             }
@@ -620,6 +643,7 @@ class KnowledgeBaseApiController extends Controller
             $type = $request->input('type', 'all');
             $locale = $this->resolveLocale($request, $mailbox);
             $filterLocale = $request->input('lang') ?? $request->input('locale');
+            $defaultLocale = \Kb::defaultLocale($mailbox);
 
             $response = [
                 'mailbox_id' => $mailbox->id,
@@ -673,7 +697,7 @@ class KnowledgeBaseApiController extends Controller
                     
                     if ($article && $article->status == KbArticle::STATUS_PUBLISHED && $category && $category->checkVisibility()) {
                         // Skip articles that don't match the requested language
-                        if ($filterLocale && $article->locale !== $filterLocale) {
+                        if ($filterLocale && !$this->localeMatches($article->locale, $filterLocale, $defaultLocale)) {
                             continue;
                         }
 
@@ -721,6 +745,7 @@ class KnowledgeBaseApiController extends Controller
 
             $locale = $this->resolveLocale($request, $mailbox);
             $filterLocale = $request->input('lang') ?? $request->input('locale');
+            $defaultLocale = \Kb::defaultLocale($mailbox);
             $includeHidden = $request->input('include_hidden', false);
 
             // Get all categories for this mailbox
@@ -763,7 +788,7 @@ class KnowledgeBaseApiController extends Controller
                     $article->setLocale($locale);
 
                     // Skip articles that don't match the requested language
-                    if ($filterLocale && $article->locale !== $filterLocale) {
+                    if ($filterLocale && !$this->localeMatches($article->locale, $filterLocale, $defaultLocale)) {
                         continue;
                     }
 
