@@ -123,9 +123,9 @@ class KnowledgeBaseApiController extends Controller
                     }
                     $subArticleCount = 0;
                     if (method_exists($sub, 'getArticlesSorted')) {
-                        $subArticles = $sub->getArticlesSorted(true);
+                        $subArticles = collect($sub->getArticlesSorted(true));
                         if ($filterLocale) {
-                            $subArticles = array_filter($subArticles, fn($a) => $a->locale === $filterLocale);
+                            $subArticles = $subArticles->filter(fn($a) => $a->locale === $filterLocale);
                         }
                         $subArticleCount = count($subArticles);
                     }
@@ -387,11 +387,11 @@ class KnowledgeBaseApiController extends Controller
 
             $articleCount = 0;
             if (method_exists($c, 'getArticlesSorted')) {
-                $articles = $c->getArticlesSorted(true);
+                $articles = collect($c->getArticlesSorted(true));
                 if ($filterLocale) {
-                    $articles = array_filter($articles, fn($a) => $a->locale === $filterLocale);
+                    $articles = $articles->filter(fn($a) => $a->locale === $filterLocale);
                 }
-                $articleCount = count($articles);
+                $articleCount = $articles->count();
             }
 
             // Skip categories with no matching articles and no matching children
@@ -431,11 +431,11 @@ class KnowledgeBaseApiController extends Controller
             }
             $articleCount = 0;
             if (method_exists($c, 'getArticlesSorted')) {
-                $articles = $c->getArticlesSorted(true);
+                $articles = collect($c->getArticlesSorted(true));
                 if ($filterLocale) {
-                    $articles = array_filter($articles, fn($a) => $a->locale === $filterLocale);
+                    $articles = $articles->filter(fn($a) => $a->locale === $filterLocale);
                 }
-                $articleCount = count($articles);
+                $articleCount = $articles->count();
             }
             if ($filterLocale && $articleCount === 0) {
                 continue;
