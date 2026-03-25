@@ -306,7 +306,13 @@ class KnowledgeBaseApiController extends Controller
 
             // Get locale
             $locale = $this->resolveLocale($request, $mailbox);
+            $filterLocale = $request->input('lang') ?? $request->input('locale');
             $article->setLocale($locale);
+
+            // If a language filter is specified, check that the article matches
+            if ($filterLocale && $article->locale !== $filterLocale) {
+                return Response::json(['error' => 'Article not available in the requested language'], 404);
+            }
 
             // Use the helper method to build the URL
             $articleUrl = $this->buildArticleUrl($mailbox->id, $category->id, $article->id);
@@ -613,7 +619,8 @@ class KnowledgeBaseApiController extends Controller
             $limit = (int) $request->input('limit', 5);
             $type = $request->input('type', 'all');
             $locale = $this->resolveLocale($request, $mailbox);
-            
+            $filterLocale = $request->input('lang') ?? $request->input('locale');
+
             $response = [
                 'mailbox_id' => $mailbox->id,
                 'name' => $mailbox->name,
@@ -665,10 +672,15 @@ class KnowledgeBaseApiController extends Controller
                     $category = KbCategory::find($articleView->category_id);
                     
                     if ($article && $article->status == KbArticle::STATUS_PUBLISHED && $category && $category->checkVisibility()) {
+                        // Skip articles that don't match the requested language
+                        if ($filterLocale && $article->locale !== $filterLocale) {
+                            continue;
+                        }
+
                         // Generate URL for the article
                         $articleUrl = $this->buildArticleUrl($mailbox->id, $category->id, $article->id);
                         $clientArticleUrl = $this->buildClientArticleUrl($mailbox->id, $category->id, $article->id);
-                        
+
                         $popularArticles[] = [
                             'id' => $article->id,
                             'title' => $article->getAttributeInLocale('title', $locale),
@@ -708,8 +720,9 @@ class KnowledgeBaseApiController extends Controller
             }
 
             $locale = $this->resolveLocale($request, $mailbox);
+            $filterLocale = $request->input('lang') ?? $request->input('locale');
             $includeHidden = $request->input('include_hidden', false);
-            
+
             // Get all categories for this mailbox
             $categories = KbCategory::where('mailbox_id', $mailbox->id)
                 ->orderBy('id')
@@ -748,7 +761,12 @@ class KnowledgeBaseApiController extends Controller
                 // Process each article
                 foreach ($articles as $article) {
                     $article->setLocale($locale);
-                    
+
+                    // Skip articles that don't match the requested language
+                    if ($filterLocale && $article->locale !== $filterLocale) {
+                        continue;
+                    }
+
                     $articleData = [
                         'id'         => $article->id,
                         'title'      => $article->getAttributeInLocale('title', $locale),
@@ -762,6 +780,11 @@ class KnowledgeBaseApiController extends Controller
                     $categoryData['articles'][] = $articleData;
                 }
                 
+                // Skip categories with no articles when filtering by language
+                if ($filterLocale && empty($categoryData['articles'])) {
+                    continue;
+                }
+
                 $exportData['categories'][] = $categoryData;
             }
             
