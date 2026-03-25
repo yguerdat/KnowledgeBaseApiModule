@@ -101,7 +101,7 @@ class KnowledgeBaseApiController extends Controller
             foreach ($sortedArticles as $a) {
                 $a->setLocale($locale);
 
-                if ($filterLocale && !$this->localeMatches($a->locale, $filterLocale, $defaultLocale)) {
+                if ($filterLocale && !$this->articleHasLocale($a, $filterLocale, $defaultLocale)) {
                     continue;
                 }
 
@@ -127,7 +127,7 @@ class KnowledgeBaseApiController extends Controller
                     if (method_exists($sub, 'getArticlesSorted')) {
                         $subArticles = collect($sub->getArticlesSorted(true));
                         if ($filterLocale) {
-                            $subArticles = $subArticles->filter(fn($a) => $this->localeMatches($a->locale, $filterLocale, $defaultLocale));
+                            $subArticles = $subArticles->filter(fn($a) => $this->articleHasLocale($a, $filterLocale, $defaultLocale));
                         }
                         $subArticleCount = count($subArticles);
                     }
@@ -205,7 +205,7 @@ class KnowledgeBaseApiController extends Controller
             $results = [];
             foreach ($articles as $article) {
                 // Skip articles that don't match the requested language
-                if ($filterLocale && !$this->localeMatches($article->locale, $filterLocale, $defaultLocale)) {
+                if ($filterLocale && !$this->articleHasLocale($article, $filterLocale, $defaultLocale)) {
                     continue;
                 }
 
@@ -316,7 +316,7 @@ class KnowledgeBaseApiController extends Controller
             $article->setLocale($locale);
 
             // If a language filter is specified, check that the article matches
-            if ($filterLocale && !$this->localeMatches($article->locale, $filterLocale, $defaultLocale)) {
+            if ($filterLocale && !$this->articleHasLocale($article, $filterLocale, $defaultLocale)) {
                 return Response::json(['error' => 'Article not available in the requested language'], 404);
             }
 
@@ -366,18 +366,37 @@ class KnowledgeBaseApiController extends Controller
     }
 
     /**
-     * Check if an article's locale matches the requested filter locale.
-     * Articles with empty/null locale are treated as matching the mailbox default locale.
+     * Check if an article has content available in the requested locale.
      *
-     * @param string|null $articleLocale
-     * @param string $filterLocale
-     * @param string $defaultLocale
+     * The KB stores translations as JSON: {"v":"default text","l":"fr","de":"German text"}.
+     * - "v" is the default/fallback content
+     * - "l" is the default locale (often empty, meaning the mailbox default)
+     * - Other keys (e.g. "de") are explicit translations
+     *
+     * For the default locale (or when "l" matches): the article always has content via "v".
+     * For other locales: the article must have an explicit translation key.
+     *
+     * @param object $article The article model
+     * @param string $filterLocale The requested locale (e.g. "fr", "de")
+     * @param string $defaultLocale The mailbox default locale
      * @return bool
      */
-    private function localeMatches(?string $articleLocale, string $filterLocale, string $defaultLocale): bool
+    private function articleHasLocale($article, string $filterLocale, string $defaultLocale): bool
     {
-        $effectiveLocale = (!empty($articleLocale)) ? $articleLocale : $defaultLocale;
-        return $effectiveLocale === $filterLocale;
+        // If requesting the default locale, the article always has content via "v"
+        $articleDefaultLocale = !empty($article->locale) ? $article->locale : $defaultLocale;
+        if ($filterLocale === $articleDefaultLocale) {
+            return true;
+        }
+
+        // For other locales, check if an explicit translation key exists in the raw JSON
+        $rawTitle = $article->getAttributes()['title'] ?? '';
+        $json = json_decode($rawTitle, true);
+        if (is_array($json) && isset($json[$filterLocale])) {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -411,7 +430,7 @@ class KnowledgeBaseApiController extends Controller
             if (method_exists($c, 'getArticlesSorted')) {
                 $articles = collect($c->getArticlesSorted(true));
                 if ($filterLocale) {
-                    $articles = $articles->filter(fn($a) => $this->localeMatches($a->locale, $filterLocale, $defaultLocale));
+                    $articles = $articles->filter(fn($a) => $this->articleHasLocale($a, $filterLocale, $defaultLocale));
                 }
                 $articleCount = $articles->count();
             }
@@ -456,7 +475,7 @@ class KnowledgeBaseApiController extends Controller
             if (method_exists($c, 'getArticlesSorted')) {
                 $articles = collect($c->getArticlesSorted(true));
                 if ($filterLocale) {
-                    $articles = $articles->filter(fn($a) => $this->localeMatches($a->locale, $filterLocale, $defaultLocale));
+                    $articles = $articles->filter(fn($a) => $this->articleHasLocale($a, $filterLocale, $defaultLocale));
                 }
                 $articleCount = $articles->count();
             }
@@ -697,7 +716,7 @@ class KnowledgeBaseApiController extends Controller
                     
                     if ($article && $article->status == KbArticle::STATUS_PUBLISHED && $category && $category->checkVisibility()) {
                         // Skip articles that don't match the requested language
-                        if ($filterLocale && !$this->localeMatches($article->locale, $filterLocale, $defaultLocale)) {
+                        if ($filterLocale && !$this->articleHasLocale($article, $filterLocale, $defaultLocale)) {
                             continue;
                         }
 
@@ -788,7 +807,7 @@ class KnowledgeBaseApiController extends Controller
                     $article->setLocale($locale);
 
                     // Skip articles that don't match the requested language
-                    if ($filterLocale && !$this->localeMatches($article->locale, $filterLocale, $defaultLocale)) {
+                    if ($filterLocale && !$this->articleHasLocale($article, $filterLocale, $defaultLocale)) {
                         continue;
                     }
 
