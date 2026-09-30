@@ -24,3 +24,5 @@ Homestead.json
 .phpunit.result.cache
 release.sh
 .DS_Store
+support_eseances_ch*
+.claude/

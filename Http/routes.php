@@ -20,4 +20,5 @@ Route::group(['middleware' => ['knowledgebase.api.token'], 'prefix' => \Helper::
     Route::get('/api/knowledgebase/{mailboxId}/search', ['uses' => 'KnowledgeBaseApiController@search', 'laroute' => false])->name('knowledgebase.search');
     Route::get('/api/knowledgebase/{mailboxId}/popular', ['uses' => 'KnowledgeBaseApiController@popular', 'laroute' => false])->name('knowledgebase.popular');
     Route::get('/api/knowledgebase/{mailboxId}/export', ['uses' => 'KnowledgeBaseApiController@export', 'laroute' => false])->name('knowledgebase.export');
+    Route::get('/api/knowledgebase/{mailboxId}/languages', ['uses' => 'KnowledgeBaseApiController@languages', 'laroute' => false])->name('knowledgebase.languages');
 });
